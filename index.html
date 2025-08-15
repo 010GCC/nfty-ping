@@ -16,14 +16,14 @@
 
 <div class="card">
   <div class="row">
-    <div class="badge" id="build">BUILD v1.1</div>
+    <div class="badge" id="build">BUILD v1.2</div>
     <div class="badge" id="zone">ET</div>
     <div class="badge" id="serialBadge"></div>
   </div>
 
-  <div class="big" id="title">Sending Photo Alert…</div>
+  <div class="big" id="title">Waiting to send…</div>
   <div class="muted" id="meta"></div>
-  <div class="hint" id="status">Posting to ntfy…</div>
+  <div class="hint" id="status">Will send when page is visible.</div>
 
   <div class="btns" id="actions" style="display:none">
     <a class="btn" id="viewLink" target="_blank">Open feed</a>
@@ -33,27 +33,20 @@
 </div>
 
 <script>
-(async () => {
+(() => {
   // --- CONFIG ---
   const TOPIC  = 'fommco-mach-complete-as9345714ljvtf'; // ntfy topic (no domain)
-  const SMS_TO = '+19374168945';                        // backup SMS recipient
+  const SMS_TO = '+19374168945';                        // backup SMS
+  const DEDUPE_TTL_MS = 8000;                           // 8s window to suppress dup opens
   // --------------
 
   const p   = new URLSearchParams(location.search);
   const mid = (p.get('mid') || 'Unknown').trim();
   const loc = (p.get('loc') || 'Unknown').trim();
+  const allowMulti = p.get('allowMulti') === '1';
 
-  // Serial: allow override via ?id=..., else generate SN-YYYYMMDD-HHMMSS-XXX in ET
-  function pad(n){return String(n).padStart(2,'0');}
   const nowET = new Date(new Date().toLocaleString('en-US',{ timeZone:'America/New_York' }));
-  const sn = (p.get('id') || (()=>{
-    const y=nowET.getFullYear(),
-          m=pad(nowET.getMonth()+1), d=pad(nowET.getDate()),
-          H=pad(nowET.getHours()),   M=pad(nowET.getMinutes()), S=pad(nowET.getSeconds()),
-          r=pad(Math.floor(Math.random()*1000)).slice(-3);
-    return `SN-${y}${m}${d}-${H}${M}${S}-${r}`;
-  })()).trim();
-
+  const sn = (p.get('id') || genSerial(nowET)).trim();
   const stamp = nowET.toLocaleString('en-US',{ timeZone:'America/New_York' });
   const msg   = `Machine ${mid} READY - ${loc} - ${stamp} - ${sn}`;
   const ntfyUrl = `https://ntfy.sh/${encodeURIComponent(TOPIC)}`;
@@ -63,42 +56,73 @@
   document.getElementById('serialBadge').textContent = sn;
   document.getElementById('viewLink').href = `https://ntfy.sh/${encodeURIComponent(TOPIC)}/json?poll=1`;
   document.getElementById('smsLink').href  = `sms:${encodeURIComponent(SMS_TO)}?&body=${encodeURIComponent(msg)}`;
-  document.getElementById('again').onclick = () => sendAll();
+  document.getElementById('again').onclick = () => { sent=false; doSend(); };
 
-  await sendAll();
+  // --- robust dedupe: cross-tab + short TTL ---
+  const key = `dedupe:${mid}|${loc}|${sn}`;
+  const last = +localStorage.getItem(key) || 0;
+  const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('photo-alert') : null;
 
-  async function sendAll(){
+  let sent = false;
+  if (!allowMulti && (Date.now()-last) < DEDUPE_TTL_MS) {
+    markDone(true, 208, 'Already sent (recent duplicate suppressed)');
+    return;
+  }
+  if (bc) bc.onmessage = (ev) => {
+    if (!allowMulti && ev.data === key && !sent) {
+      markDone(true, 208, 'Duplicate window (suppressed by broadcast)');
+    }
+  };
+
+  // Only send when page is *visible* (previews/prefetch are hidden)
+  if (document.visibilityState === 'visible') doSend();
+  else {
+    document.getElementById('status').textContent = 'Waiting for visibility…';
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !sent) doSend();
+    }, { once: true });
+  }
+
+  async function doSend(){
+    if (sent) return;
+    sent = true;
     setStatus('Posting to ntfy…');
+
     try {
       const r = await fetch(ntfyUrl, { method:'POST', headers:{'Content-Type':'text/plain'}, body: msg });
-      return done(true, r.status);
-    } catch (_) {
-      /* fall through */
-    }
+      if (r.ok) return markDone(true, r.status);
+    } catch (_) { /* fall through */ }
+
     try {
-      // Form fallback
+      // Fallback: form submit
       const form = document.createElement('form');
       form.method='POST'; form.action=ntfyUrl; form.enctype='text/plain'; form.target='sink';
       const input = document.createElement('input'); input.name='m'; input.value=msg;
       form.appendChild(input);
       const sink = document.createElement('iframe'); sink.name='sink'; sink.style.display='none';
       document.body.appendChild(sink); document.body.appendChild(form); form.submit();
-      done(true, 200, 'Form fallback');
+      markDone(true, 200, 'Form fallback');
     } catch (e) {
-      done(false, 0, e?.message || 'Unknown error');
+      markDone(false, 0, e?.message || 'Unknown error');
     }
   }
 
-  function done(ok, code, extra){
+  function markDone(ok, code, extra){
+    localStorage.setItem(key, Date.now());
+    if (bc) { try { bc.postMessage(key); } catch(_){} }
     document.getElementById('actions').style.display = 'flex';
-    if (ok) {
-      document.getElementById('title').innerHTML = '✅ Photo Alert Sent';
-      setStatus(`ntfy response: <code>${code}</code>${extra?' • '+escapeHtml(extra):''}`, true);
-    } else {
-      document.getElementById('title').innerHTML = '❌ Send Failed';
-      setStatus(`If this persists, tap <b>SMS backup</b> to notify manually.`, false);
-    }
+    document.getElementById('title').innerHTML = ok ? '✅ Photo Alert Sent' : '❌ Send Failed';
+    setStatus(`ntfy response: <code>${code}</code>${extra?' • '+escapeHtml(extra):''}`, ok);
   }
+
+  function genSerial(d){
+    const pad=n=>String(n).padStart(2,'0');
+    const y=d.getFullYear(), m=pad(d.getMonth()+1), day=pad(d.getDate());
+    const H=pad(d.getHours()), M=pad(d.getMinutes()), S=pad(d.getSeconds());
+    const r=String(Math.floor(Math.random()*1000)).padStart(3,'0');
+    return `SN-${y}${m}${day}-${H}${M}${S}-${r}`;
+  }
+
   function setStatus(text, good){
     const el=document.getElementById('status');
     el.innerHTML=text; el.className='hint '+(good===true?'ok':good===false?'err':'');
