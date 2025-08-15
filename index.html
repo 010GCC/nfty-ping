@@ -1,0 +1,27 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Photo Alert</title>
+<style>body{font-family:system-ui;margin:32px} .card{max-width:560px;padding:20px;border:1px solid #ddd;border-radius:12px}</style>
+<div class="card" id="out">Sending…</div>
+<script>
+(async () => {
+  const p = new URLSearchParams(location.search);
+  const mid = (p.get('mid') || 'Unknown').trim();
+  const loc = (p.get('loc') || 'Unknown').trim();
+  const msg = `Machine ${mid} READY - ${loc} - ` + new Date().toLocaleString('en-US',{ timeZone:'America/New_York' });
+  const topic = 'fommco-mach-complete-as9345714ljvtf';                 // your topic
+  const url = 'https://ntfy.sh/' + encodeURIComponent(topic);
+  const out = document.getElementById('out');
+
+  try {
+    const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain'}, body: msg });
+    out.textContent = `✅ Sent to ntfy (${r.status}).`;
+  } catch (_) {
+    // Fallback: auto-submit a simple form (works even if fetch is blocked)
+    const f = document.createElement('form'); f.method='POST'; f.action=url; f.enctype='text/plain';
+    const i = document.createElement('input'); i.name='m'; i.value = msg; f.appendChild(i);
+    document.body.appendChild(f); f.submit();
+    out.textContent = '✅ Sent to ntfy (form fallback).';
+  }
+})();
+</script>
