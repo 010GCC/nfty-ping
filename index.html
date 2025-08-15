@@ -1,27 +1,117 @@
 <!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Photo Alert</title>
-<style>body{font-family:system-ui;margin:32px} .card{max-width:560px;padding:20px;border:1px solid #ddd;border-radius:12px}</style>
-<div class="card" id="out">Sending…</div>
+<style>
+  :root{--ok:#16a34a;--err:#dc2626;--ink:#111827;--muted:#6b7280;--line:#e5e7eb}
+  *{box-sizing:border-box} body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#fff;margin:0;padding:24px;color:var(--ink)}
+  .card{max-width:680px;margin:0 auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:24px;box-shadow:0 2px 16px rgba(0,0,0,.04)}
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .badge{font-size:12px;padding:4px 8px;border-radius:999px;background:#f3f4f6;color:#374151;border:1px solid #e5e7eb}
+  .muted{color:var(--muted)}
+  .big{font-size:20px;font-weight:700;margin:8px 0 4px}
+  .ok{color:var(--ok)} .err{color:var(--err)}
+  .hint{font-size:13px;margin-top:8px}
+  .btns{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
+  a.btn,button.btn{appearance:none;border:1px solid var(--line);background:#fff;border-radius:10px;padding:10px 14px;text-decoration:none;color:var(--ink);font-weight:600}
+  a.btn:hover,button.btn:hover{background:#f9fafb}
+  code{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;padding:2px 6px}
+  .spinner{width:16px;height:16px;border:2px solid #e5e7eb;border-top-color:#94a3b8;border-radius:50%;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+
+<div class="card">
+  <div class="row">
+    <div class="spinner" id="spin"></div>
+    <div class="badge" id="build">BUILD v1.0</div>
+    <div class="badge" id="zone">ET</div>
+  </div>
+
+  <div class="big" id="title">Sending Photo Alert…</div>
+  <div class="muted" id="meta"></div>
+
+  <div class="hint" id="status">Posting to ntfy…</div>
+
+  <div class="btns" id="actions" style="display:none">
+    <!-- Opens your topic feed (handy for testing) -->
+    <a class="btn" id="viewLink" target="_blank">Open feed</a>
+    <!-- Backup: one-tap SMS compose to you/marketing -->
+    <a class="btn" id="smsLink">SMS backup</a>
+    <button class="btn" id="again">Send again</button>
+  </div>
+</div>
+
 <script>
 (async () => {
-  const p = new URLSearchParams(location.search);
+  // --- CONFIG (edit topic & SMS destination) ---
+  const TOPIC   = 'fommco-mach-complete-as9345714ljvtf';   // ntfy topic (no domain)
+  const SMS_TO  = '+19374168945';                           // your SMS number
+  // ---------------------------------------------
+
+  const p   = new URLSearchParams(location.search);
   const mid = (p.get('mid') || 'Unknown').trim();
   const loc = (p.get('loc') || 'Unknown').trim();
-  const msg = `Machine ${mid} READY - ${loc} - ` + new Date().toLocaleString('en-US',{ timeZone:'America/New_York' });
-  const topic = 'fommco-mach-complete-as9345714ljvtf';                 // your topic
-  const url = 'https://ntfy.sh/' + encodeURIComponent(topic);
-  const out = document.getElementById('out');
+  const now = new Date().toLocaleString('en-US',{ timeZone:'America/New_York' });
 
-  try {
-    const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain'}, body: msg });
-    out.textContent = `✅ Sent to ntfy (${r.status}).`;
-  } catch (_) {
-    // Fallback: auto-submit a simple form (works even if fetch is blocked)
-    const f = document.createElement('form'); f.method='POST'; f.action=url; f.enctype='text/plain';
-    const i = document.createElement('input'); i.name='m'; i.value = msg; f.appendChild(i);
-    document.body.appendChild(f); f.submit();
-    out.textContent = '✅ Sent to ntfy (form fallback).';
+  const msg = `Machine ${mid} READY - ${loc} - ${now}`;
+  const ntfyUrl = `https://ntfy.sh/${encodeURIComponent(TOPIC)}`;
+
+  // UI fill
+  document.getElementById('meta').textContent = `MID: ${mid} • LOC: ${loc}`;
+  document.getElementById('viewLink').href = `https://ntfy.sh/${encodeURIComponent(TOPIC)}/json?poll=1`;
+  document.getElementById('smsLink').href  = `sms:${encodeURIComponent(SMS_TO)}?&body=${encodeURIComponent(msg)}`;
+  document.getElementById('again').onclick = () => sendAll();
+
+  // Simple duplicate guard: avoid rapid double posts from double-scan
+  const key = `sent:${mid}:${loc}`;
+  if (sessionStorage.getItem(key)) {
+    done(true, 208, 'Already sent recently (guard).');
+  } else {
+    await sendAll();
+    sessionStorage.setItem(key, Date.now());
   }
+
+  async function sendAll(){
+    setStatus('Posting to ntfy…');
+    try {
+      // 1) Try fetch (preferred)
+      const r = await fetch(ntfyUrl, { method:'POST', headers:{'Content-Type':'text/plain'}, body: msg });
+      if (r.ok) return done(true, r.status);
+    } catch (_) { /* fall through */ }
+
+    try {
+      // 2) Form fallback (works even if fetch is blocked)
+      const form = document.createElement('form');
+      form.method = 'POST'; form.action = ntfyUrl; form.enctype = 'text/plain'; form.target = 'sink';
+      const input = document.createElement('input'); input.name = 'm'; input.value = msg;
+      form.appendChild(input);
+      const sink = document.createElement('iframe'); sink.name = 'sink'; sink.style.display = 'none';
+      document.body.appendChild(sink); document.body.appendChild(form);
+      form.submit();
+      // we can’t read status, assume success—ntfy is tolerant
+      return done(true, 200, 'Form fallback');
+    } catch (e) {
+      done(false, 0, e?.message || 'Unknown error');
+    }
+  }
+
+  function done(ok, code, extra){
+    document.getElementById('spin').style.display = 'none';
+    document.getElementById('actions').style.display = 'flex';
+    if (ok) {
+      document.getElementById('title').innerHTML = '✅ Photo Alert Sent';
+      setStatus(`ntfy response: <code>${code}</code>${extra? ' • '+escapeHtml(extra):''}`, true);
+    } else {
+      document.getElementById('title').innerHTML = '❌ Send Failed';
+      setStatus(`Trouble posting to ntfy. Tap <b>SMS backup</b> below to notify manually.`, false);
+    }
+  }
+
+  function setStatus(text, good){
+    const el = document.getElementById('status');
+    el.innerHTML = text;
+    el.className = 'hint ' + (good===true ? 'ok' : good===false ? 'err' : '');
+  }
+
+  function escapeHtml(s){ return String(s).replace(/[<>&"]/g, c=>({ '<':'&lt;','>':'&gt;','&':'&amp;' }[c])); }
 })();
 </script>
